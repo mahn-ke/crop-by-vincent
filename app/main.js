@@ -11,8 +11,9 @@ const server = http.createServer((req, res) => {
     if (req.url === '/healthz') {
         res.writeHead(200);
         res.end('OK');
+        return;
     }
-    
+
     if (req.method !== 'GET' || req.url !== '/') {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Not Found');
