@@ -1,5 +1,6 @@
 {
     "name": "crop-by-vincent",
+    "type": "module",
     "scripts": {
         "start": "node main.js"
     }

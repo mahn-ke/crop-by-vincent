@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Crop</title>
+    <style>
+        html {
+            background-color: #000;
+        }
+        .renderer {
+            display: flex;
+            flex-direction: row;
+            justify-content: space-around;
+        }
+        canvas {
+            background-color: grey;
+            width: 40vw;
+            height: 90vh;
+        }
+        #controls {
+            background-color: #333;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-around;
+            align-items: center;
+        }
+        #controls > div {
+            display: flex;
+            flex-direction: column;
+        }
+    </style>
+</head>
+<body>
+    <div class="renderer">
+        <canvas id="full"></canvas>
+        <div id="controls">
+            <h3>Crop Controls</h3>
+            <div style="margin: 10px 0;">
+                <label>X (center, 0-1): </label>
+                <input type="range" id="cropX" min="0" max="1" step="0.01" value="0.5">
+                <span id="cropXValue">0.67</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label>Y (center, 0-1): </label>
+                <input type="range" id="cropY" min="0" max="1" step="0.01" value="0.5">
+                <span id="cropYValue">0.46</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label>Width (pixels): </label>
+                <input type="range" id="cropWidth" min="10" max="2661" step="10" value="100">
+                <span id="cropWidthValue">1530</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label>Height (pixels): </label>
+                <input type="range" id="cropHeight" min="10" max="3782" step="10" value="100">
+                <span id="cropHeightValue">1640</span>
+            </div>
+            <div style="margin: 10px 0;">
+                <label>Rotation (degrees, 0-3600): </label>
+                <input type="range" id="cropRotation" min="0" max="3600" step="1" value="0">
+                <span id="cropRotationValue">21</span>
+            </div>
+            <button id="saveCropButton" type="button">Save Crop as PNG</button>
+        </div>
+        <canvas id="crop"></canvas>
+    </div>
+    <input type="file" name="image" id="image">
+    <script>
+        const fullImageCanvas = document.querySelector("canvas#full");
+        const fullImageCanvasContext = fullImageCanvas.getContext("2d");
+        const cropCanvas = document.querySelector("canvas#crop");
+        const cropCanvasContext = cropCanvas.getContext("2d");
+        let showGridOverlay = false;
+
+        let fullImageData = null;
+        const EPSILON = 1e-6;
+
+        const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+        const targetSize = (inputWidth, inputHeight, targetWidth, targetHeight) => {
+            const inputRatio = inputWidth / inputHeight;
+            const targetRatio = targetWidth / targetHeight;
+            
+            let width, height;
+            if (inputRatio > targetRatio) {
+                // Input is wider – constrain by width
+                width = targetWidth;
+                height = targetWidth / inputRatio;
+            } else {
+                // Input is taller or square – constrain by height
+                width = targetHeight * inputRatio;
+                height = targetHeight;
+            }
+            
+            return {
+                width,
+                height,
+                offsetX: (targetWidth - width) / 2,
+                offsetY: (targetHeight - height) / 2
+            };
+        };
+
+        const drawGridOverlay = (ctx, width, height) => {
+            const divisions = 15;
+            ctx.save();
+            ctx.strokeStyle = "rgba(255, 255, 255, 0.65)";
+            ctx.lineWidth = 1;
+
+            for (let i = 1; i < divisions; i += 1) {
+                const px = -width / 2 + (i * width) / divisions;
+                const py = -height / 2 + (i * height) / divisions;
+
+                ctx.beginPath();
+                ctx.moveTo(px, -height / 2);
+                ctx.lineTo(px, height / 2);
+                ctx.stroke();
+
+                ctx.beginPath();
+                ctx.moveTo(-width / 2, py);
+                ctx.lineTo(width / 2, py);
+                ctx.stroke();
+            }
+
+            ctx.restore();
+        };
+
+        let crop = {
+            x: 0,
+            y: 0,
+            height: 0,
+            width: 0,
+            rotation: 0
+        };
+
+        const resetCrop = () => {
+            crop = {
+                x: 0.5,
+                y: 0.5,
+                height: fullImageData.height,
+                width: fullImageData.width,
+                rotation: 0
+            }
+        };
+
+        const calculateCrop = () => {
+            // x, y are relative offsets (0.5 = center)
+            // width, height are absolute pixel dimensions
+            const centerX = fullImageData.width * crop.x;
+            const centerY = fullImageData.height * crop.y;
+            
+            const cropX = centerX - crop.width / 2;
+            const cropY = centerY - crop.height / 2;
+            
+            // Clamp to image bounds
+            const clampedX = Math.max(0, Math.min(cropX, fullImageData.width - crop.width));
+            const clampedY = Math.max(0, Math.min(cropY, fullImageData.height - crop.height));
+            
+            return {
+                x: clampedX,
+                y: clampedY,
+                centerX,
+                centerY,
+                width: crop.width,
+                height: crop.height,
+                rotation: crop.rotation / 10
+            };
+        };
+
+        const getRotationTerms = (degrees) => {
+            const radians = (degrees * Math.PI) / 180;
+            return {
+                a: Math.abs(Math.cos(radians)),
+                b: Math.abs(Math.sin(radians))
+            };
+        };
+
+        const maxWidthForHeight = (height, imgWidth, imgHeight, terms) => {
+            let maxWidth = imgWidth;
+            if (terms.a > EPSILON) {
+                maxWidth = Math.min(maxWidth, (imgWidth - (height * terms.b)) / terms.a);
+            }
+            if (terms.b > EPSILON) {
+                maxWidth = Math.min(maxWidth, (imgHeight - (height * terms.a)) / terms.b);
+            }
+            return Math.max(1, maxWidth);
+        };
+
+        const maxHeightForWidth = (width, imgWidth, imgHeight, terms) => {
+            let maxHeight = imgHeight;
+            if (terms.b > EPSILON) {
+                maxHeight = Math.min(maxHeight, (imgWidth - (width * terms.a)) / terms.b);
+            }
+            if (terms.a > EPSILON) {
+                maxHeight = Math.min(maxHeight, (imgHeight - (width * terms.b)) / terms.a);
+            }
+            return Math.max(1, maxHeight);
+        };
+
+        const fitUniformScale = (width, height, imgWidth, imgHeight, terms) => {
+            const boundWidth = (width * terms.a) + (height * terms.b);
+            const boundHeight = (width * terms.b) + (height * terms.a);
+
+            const scaleForWidth = imgWidth / Math.max(EPSILON, boundWidth);
+            const scaleForHeight = imgHeight / Math.max(EPSILON, boundHeight);
+            const scale = Math.min(1, scaleForWidth, scaleForHeight);
+
+            return {
+                width: Math.max(1, width * scale),
+                height: Math.max(1, height * scale)
+            };
+        };
+
+        const constrainCrop = (changedField = null) => {
+            if (!fullImageData) {
+                return;
+            }
+
+            const imgWidth = fullImageData.width;
+            const imgHeight = fullImageData.height;
+            crop.rotation = ((crop.rotation % 3600) + 3600) % 3600;
+
+            const terms = getRotationTerms(crop.rotation/10);
+            crop.width = Math.max(1, crop.width);
+            crop.height = Math.max(1, crop.height);
+
+            if (changedField === "rotation") {
+                // Keep the current crop ratio and shrink both dimensions only as much as needed.
+                const fitted = fitUniformScale(crop.width, crop.height, imgWidth, imgHeight, terms);
+                crop.width = fitted.width;
+                crop.height = fitted.height;
+            } else if (changedField === "width") {
+                crop.width = Math.min(crop.width, maxWidthForHeight(crop.height, imgWidth, imgHeight, terms));
+                crop.height = Math.min(crop.height, maxHeightForWidth(crop.width, imgWidth, imgHeight, terms));
+            } else if (changedField === "height") {
+                crop.height = Math.min(crop.height, maxHeightForWidth(crop.width, imgWidth, imgHeight, terms));
+                crop.width = Math.min(crop.width, maxWidthForHeight(crop.height, imgWidth, imgHeight, terms));
+            } else {
+                crop.width = Math.min(crop.width, maxWidthForHeight(crop.height, imgWidth, imgHeight, terms));
+                crop.height = Math.min(crop.height, maxHeightForWidth(crop.width, imgWidth, imgHeight, terms));
+                crop.width = Math.min(crop.width, maxWidthForHeight(crop.height, imgWidth, imgHeight, terms));
+            }
+
+            const halfWidth = crop.width / 2;
+            const halfHeight = crop.height / 2;
+            const extentX = (halfWidth * terms.a) + (halfHeight * terms.b);
+            const extentY = (halfWidth * terms.b) + (halfHeight * terms.a);
+
+            const centerX = clamp(crop.x * imgWidth, extentX, imgWidth - extentX);
+            const centerY = clamp(crop.y * imgHeight, extentY, imgHeight - extentY);
+            crop.x = centerX / imgWidth;
+            crop.y = centerY / imgHeight;
+
+            // Keep slider max values coherent with current rotation and paired size.
+            cropWidthInput.max = Math.floor(maxWidthForHeight(crop.height, imgWidth, imgHeight, terms));
+            cropHeightInput.max = Math.floor(maxHeightForWidth(crop.width, imgWidth, imgHeight, terms));
+        };
+
+        const redrawFull = () => {
+            fullImageCanvas.width = window.innerWidth / 2;
+            fullImageCanvas.height = window.innerHeight;
+            const {width, height, offsetX, offsetY} = targetSize(fullImageData.width, fullImageData.height, fullImageCanvas.width, fullImageCanvas.height);
+            fullImageCanvasContext.drawImage(fullImageData, offsetX, offsetY, width, height);
+
+            const calculated = calculateCrop();
+            const scaleX = width / fullImageData.width;
+            const scaleY = height / fullImageData.height;
+
+            const rectX = offsetX + (calculated.x * scaleX);
+            const rectY = offsetY + (calculated.y * scaleY);
+            const rectW = calculated.width * scaleX;
+            const rectH = calculated.height * scaleY;
+            const rectCenterX = rectX + (rectW / 2);
+            const rectCenterY = rectY + (rectH / 2);
+
+            fullImageCanvasContext.save();
+            fullImageCanvasContext.translate(rectCenterX, rectCenterY);
+            fullImageCanvasContext.rotate((calculated.rotation * Math.PI) / 180);
+
+            drawGridOverlay(fullImageCanvasContext, rectW, rectH);
+
+            fullImageCanvasContext.lineWidth = 3;
+            fullImageCanvasContext.strokeStyle = "#2f80ff";
+            fullImageCanvasContext.strokeRect(-rectW / 2, -rectH / 2, rectW, rectH);
+            fullImageCanvasContext.restore();
+        }
+
+        const renderCropBuffer = () => {
+            const calculated = calculateCrop();
+            const centerX = calculated.x + (calculated.width / 2);
+            const centerY = calculated.y + (calculated.height / 2);
+            const radians = (calculated.rotation * Math.PI) / 180;
+
+            const cropBuffer = document.createElement("canvas");
+            cropBuffer.width = Math.max(1, Math.round(calculated.width));
+            cropBuffer.height = Math.max(1, Math.round(calculated.height));
+            const cropBufferContext = cropBuffer.getContext("2d");
+
+            cropBufferContext.save();
+            cropBufferContext.translate(cropBuffer.width / 2, cropBuffer.height / 2);
+            cropBufferContext.rotate(-radians);
+            cropBufferContext.translate(-centerX, -centerY);
+            cropBufferContext.drawImage(fullImageData, 0, 0);
+            cropBufferContext.restore();
+
+            return { cropBuffer, calculated };
+        };
+
+        const redrawCrop = () => {
+            cropCanvas.width = window.innerWidth / 2;
+            cropCanvas.height = window.innerHeight;
+            
+            const { cropBuffer, calculated } = renderCropBuffer();
+            const fit = targetSize(calculated.width, calculated.height, cropCanvas.width, cropCanvas.height);
+
+            cropCanvasContext.clearRect(0, 0, cropCanvas.width, cropCanvas.height);
+            cropCanvasContext.drawImage(
+                cropBuffer,
+                0,
+                0,
+                cropBuffer.width,
+                cropBuffer.height,
+                fit.offsetX,
+                fit.offsetY,
+                fit.width,
+                fit.height
+            );
+
+            cropCanvasContext.save();
+            cropCanvasContext.translate(fit.offsetX + (fit.width / 2), fit.offsetY + (fit.height / 2));
+            drawGridOverlay(cropCanvasContext, fit.width, fit.height);
+            cropCanvasContext.restore();
+        }
+
+        const redraw = () => {
+            if (!fullImageData) {
+                return;
+            }
+            redrawFull();
+            redrawCrop();
+        };
+        
+        window.addEventListener("resize", redraw);
+
+        const onImageLoad = imageData => {
+            var image = new Image();
+            image.onload = function() {
+                fullImageData = image;
+                resetCrop();
+                redraw();
+                cropWidthInput.max = fullImageData.width;
+                cropHeightInput.max = fullImageData.height;
+                syncInputsToCrop();
+            };
+            image.src = imageData.currentTarget.result;
+        };
+
+        const onImageChange = changeData => {
+            var fileReader = new FileReader();
+            fileReader.onload = onImageLoad;
+            fileReader.readAsDataURL(changeData.currentTarget.files[0]);
+        };
+
+        const fileUpload = document.querySelector("#image").addEventListener("change", onImageChange);
+
+        // Control panel
+        const controlsDiv = document.getElementById("controls");
+        const cropXInput = document.getElementById("cropX");
+        const cropYInput = document.getElementById("cropY");
+        const cropWidthInput = document.getElementById("cropWidth");
+        const cropHeightInput = document.getElementById("cropHeight");
+        const cropRotationInput = document.getElementById("cropRotation");
+        const saveCropButton = document.getElementById("saveCropButton");
+        const cropRangeInputs = [cropXInput, cropYInput, cropWidthInput, cropHeightInput, cropRotationInput];
+
+        const updateControlValues = () => {
+            document.getElementById("cropXValue").textContent = crop.x.toFixed(2);
+            document.getElementById("cropYValue").textContent = crop.y.toFixed(2);
+            document.getElementById("cropWidthValue").textContent = Math.round(crop.width);
+            document.getElementById("cropHeightValue").textContent = Math.round(crop.height);
+            document.getElementById("cropRotationValue").textContent = Math.round(crop.rotation);
+        };
+
+        const syncInputsToCrop = () => {
+            cropXInput.value = crop.x;
+            cropYInput.value = crop.y;
+            cropWidthInput.value = crop.width;
+            cropHeightInput.value = crop.height;
+            cropRotationInput.value = crop.rotation;
+            updateControlValues();
+        };
+
+        cropXInput.addEventListener("input", (e) => {
+            crop.x = parseFloat(e.target.value);
+            constrainCrop("x");
+            updateControlValues();
+            syncInputsToCrop();
+            redraw();
+        });
+
+        cropYInput.addEventListener("input", (e) => {
+            crop.y = parseFloat(e.target.value);
+            constrainCrop("y");
+            updateControlValues();
+            syncInputsToCrop();
+            redraw();
+        });
+
+        cropWidthInput.addEventListener("input", (e) => {
+            crop.width = parseFloat(e.target.value);
+            constrainCrop("width");
+            updateControlValues();
+            syncInputsToCrop();
+            redraw();
+        });
+
+        cropHeightInput.addEventListener("input", (e) => {
+            crop.height = parseFloat(e.target.value);
+            constrainCrop("height");
+            updateControlValues();
+            syncInputsToCrop();
+            redraw();
+        });
+
+        cropRotationInput.addEventListener("input", (e) => {
+            crop.rotation = parseFloat(e.target.value);
+            constrainCrop("rotation");
+            updateControlValues();
+            syncInputsToCrop();
+            redraw();
+        });
+
+        saveCropButton.addEventListener("click", () => {
+            if (!fullImageData) {
+                return;
+            }
+
+            const { cropBuffer } = renderCropBuffer();
+            const link = document.createElement("a");
+            link.href = cropBuffer.toDataURL("image/png");
+            link.download = "crop.png";
+            link.click();
+        });
+
+        for (const input of cropRangeInputs) {
+            input.addEventListener("pointerdown", () => {
+                showGridOverlay = true;
+                redraw();
+            });
+
+            input.addEventListener("pointerup", () => {
+                showGridOverlay = false;
+                redraw();
+            });
+
+            input.addEventListener("pointercancel", () => {
+                showGridOverlay = false;
+                redraw();
+            });
+        }
+
+        // Show controls and update max values when image loads
+        const originalOnImageLoad = onImageLoad;
+        const newOnImageLoad = (imageData) => {
+            originalOnImageLoad(imageData);
+        };
+        document.querySelector("#image").removeEventListener("change", onImageChange);
+        document.querySelector("#image").addEventListener("change", (changeData) => {
+            var fileReader = new FileReader();
+            fileReader.onload = newOnImageLoad;
+            fileReader.readAsDataURL(changeData.currentTarget.files[0]);
+        });
+
+    </script>
+</body>
+</html>
