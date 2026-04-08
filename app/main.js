@@ -8,6 +8,11 @@ const __dirname = path.dirname(__filename);
 const INDEX_FILE = path.join(__dirname, 'index.html');
 
 const server = http.createServer((req, res) => {
+    if (req.url === '/healthz') {
+        res.writeHead(200);
+        res.end('OK');
+    }
+    
     if (req.method !== 'GET' || req.url !== '/') {
         res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('Not Found');
