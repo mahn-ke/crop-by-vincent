@@ -1,0 +1,6 @@
+{
+    "name": "crop-by-vincent",
+    "scripts": {
+        "start": "node main.js"
+    }
+}
